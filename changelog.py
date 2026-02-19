@@ -100,61 +100,79 @@ def get_digest(registry: str, image: str, tag: str) -> str:
     return retry(RETRIES, _fetch_digest)
 
 def extract_payloads(s: str) -> list[str]:
+    # Regex to extract 'payload' from JSON lines in cosign output
     return re.findall(r'"payload"\s*:\s*"([^"]+)"', s)
 
 def fetch_sbom(registry: str, cosign_key: str, image: str, digest: str) -> dict:
-    def _fetch():
-        reg = registry if registry.endswith('/') else f"{registry}/"
-        cmd = [
-            "cosign", "verify-attestation",
-            "--key", cosign_key,
-            f"{reg}{image}@{digest}"
-        ]
-        raw = run_cmd(cmd)
+    # Try multiple predicate types since Bluefin images might use different formats
+    # (e.g. standard spdxjson or the new zstd compressed custom type)
+    # Cosign defaults to 'custom' which fails if we don't specify the exact type match.
+    predicate_types = [
+        "spdxjson",
+        "urn:ublue-os:attestation:spdx+json+zstd:v1"
+    ]
 
-        payloads = extract_payloads(raw)
-        if not payloads:
-            raise ValueError("No payload found in attestation output.")
+    for p_type in predicate_types:
+        def _fetch():
+            reg = registry if registry.endswith('/') else f"{registry}/"
+            cmd = [
+                "cosign", "verify-attestation",
+                "--key", cosign_key,
+                "--type", p_type,
+                f"{reg}{image}@{digest}"
+            ]
+            return run_cmd(cmd)
 
-        for payload_b64 in payloads:
-            try:
-                payload_bytes = base64.b64decode(payload_b64)
-                payload_json = json.loads(payload_bytes.decode("utf-8"))
-                
-                predicate_type = payload_json.get("predicateType")
-                predicate = payload_json.get("predicate", {})
+        try:
+            raw = retry(RETRIES, _fetch)
+            payloads = extract_payloads(raw)
+            if not payloads:
+                continue
 
-                # Handle standard SPDX JSON
-                if predicate_type in ["https://spdx.dev/Document", "spdxjson", "application/spdx+json"]:
-                     if predicate.get("packages") or predicate.get("artifacts"):
-                         return predicate
-                
-                # Handle Bluefin zstd compressed SBOM
-                if predicate_type == "urn:ublue-os:attestation:spdx+json+zstd:v1":
-                    if isinstance(predicate, str):
-                        zstd_bytes = base64.b64decode(predicate)
-                        dctx = zstd.ZstdDecompressor()
-                        decompressed = dctx.decompress(zstd_bytes)
-                        sbom = json.loads(decompressed)
-                        if sbom.get("packages") or sbom.get("artifacts"):
-                            return sbom
-                    elif isinstance(predicate, dict) and predicate.get("compression") == "zstd":
-                        raw_payload = predicate.get("payload")
-                        if raw_payload:
-                            zstd_bytes = base64.b64decode(raw_payload)
+            for payload_b64 in payloads:
+                try:
+                    payload_bytes = base64.b64decode(payload_b64)
+                    payload_json = json.loads(payload_bytes.decode("utf-8"))
+                    
+                    predicate_type = payload_json.get("predicateType")
+                    predicate = payload_json.get("predicate", {})
+
+                    # Handle standard SPDX JSON
+                    if predicate_type in ["https://spdx.dev/Document", "spdxjson", "application/spdx+json"]:
+                         if predicate.get("packages") or predicate.get("artifacts"):
+                             return predicate
+                    
+                    # Handle Bluefin zstd compressed SBOM
+                    if predicate_type == "urn:ublue-os:attestation:spdx+json+zstd:v1":
+                        if isinstance(predicate, str):
+                            zstd_bytes = base64.b64decode(predicate)
                             dctx = zstd.ZstdDecompressor()
                             decompressed = dctx.decompress(zstd_bytes)
                             sbom = json.loads(decompressed)
                             if sbom.get("packages") or sbom.get("artifacts"):
                                 return sbom
+                        elif isinstance(predicate, dict) and predicate.get("compression") == "zstd":
+                            raw_payload = predicate.get("payload")
+                            if raw_payload:
+                                zstd_bytes = base64.b64decode(raw_payload)
+                                dctx = zstd.ZstdDecompressor()
+                                decompressed = dctx.decompress(zstd_bytes)
+                                sbom = json.loads(decompressed)
+                                if sbom.get("packages") or sbom.get("artifacts"):
+                                    return sbom
 
-            except Exception as e:
-                log.warning(f"Skipping payload that failed to decode: {e}")
-                continue
+                except Exception as e:
+                    log.warning(f"Skipping payload that failed to decode: {e}")
+                    continue
+            
+            # If we found payloads but none parsed correctly, try next type
+            continue
 
-        raise ValueError("No valid SPDX predicate found among attestation payloads.")
+        except Exception:
+            # If cosign failed (exit code 1), try next type
+            continue
 
-    return retry(RETRIES, _fetch)
+    raise ValueError(f"No valid SBOM found for {image}@{digest} with types {predicate_types}")
 
 # ----------------------------------------------------------------------------
 # Package Extraction
