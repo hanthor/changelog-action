@@ -201,7 +201,10 @@ def discover_tags(registry: str, image: str, stream: str) -> tuple[str, str]:
     log.info(f"Discovering tags for {image} {stream}...")
     tags = get_tag_list(registry, image, stream)
     
-    pattern = re.compile(rf"^{{stream}}-({{0,1}}\d+\.)?\d{{8}}(?:\.\d+)?$")
+    # Matches tags like: lts-20251115 or lts.20251115
+    # Supports hyphen or dot separator.
+    # We use f-string for stream, so single braces for stream, double for regex quantifiers.
+    pattern = re.compile(rf"^{stream}[-.]\d{{8}}(?:\.\d+)?$")
     filtered_tags = sorted([t for t in tags if pattern.match(t)])
     
     if len(filtered_tags) < 2:
