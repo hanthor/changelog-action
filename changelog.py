@@ -86,7 +86,7 @@ def get_digest(registry: str, image: str, tag: str) -> str:
                 if p.get("os") == "linux" and p.get("architecture") == "amd64":
                     return m["digest"]
             
-            # Fallback if no amd64 found (unlikely for Bluefin)
+            # Fallback if no amd64 found
             log.warning("No linux/amd64 manifest found in index. Using the first manifest.")
             return data["manifests"][0]["digest"]
             
@@ -100,7 +100,6 @@ def get_digest(registry: str, image: str, tag: str) -> str:
     return retry(RETRIES, _fetch_digest)
 
 def extract_payloads(s: str) -> list[str]:
-    # Regex to extract 'payload' from JSON lines in cosign output
     return re.findall(r'"payload"\s*:\s*"([^"]+)"', s)
 
 def fetch_sbom(registry: str, cosign_key: str, image: str, digest: str) -> dict:
@@ -108,7 +107,6 @@ def fetch_sbom(registry: str, cosign_key: str, image: str, digest: str) -> dict:
         reg = registry if registry.endswith('/') else f"{registry}/"
         cmd = [
             "cosign", "verify-attestation",
-            # We remove --type spdxjson to fetch all attestations and manually filter/decode
             "--key", cosign_key,
             f"{reg}{image}@{digest}"
         ]
@@ -133,7 +131,6 @@ def fetch_sbom(registry: str, cosign_key: str, image: str, digest: str) -> dict:
                 
                 # Handle Bluefin zstd compressed SBOM
                 if predicate_type == "urn:ublue-os:attestation:spdx+json+zstd:v1":
-                    # For this type, predicate is a base64 encoded string of zstd compressed JSON
                     if isinstance(predicate, str):
                         zstd_bytes = base64.b64decode(predicate)
                         dctx = zstd.ZstdDecompressor()
@@ -142,7 +139,6 @@ def fetch_sbom(registry: str, cosign_key: str, image: str, digest: str) -> dict:
                         if sbom.get("packages") or sbom.get("artifacts"):
                             return sbom
                     elif isinstance(predicate, dict) and predicate.get("compression") == "zstd":
-                        # Handle case where predicate is object wrapping payload
                         raw_payload = predicate.get("payload")
                         if raw_payload:
                             zstd_bytes = base64.b64decode(raw_payload)
@@ -208,18 +204,26 @@ def build_release(registry: str, cosign_key: str, images: list[str], tag: str) -
 # ----------------------------------------------------------------------------
 
 def get_tag_list(registry: str, image: str, tag: str) -> list[str]:
-    # Don't resolve index when listing tags, just in case overrides affect RepoTags availability
-    manifest = fetch_manifest(registry, image, tag, resolve_index=False)
-    tags = manifest.get("RepoTags", [])
-    log.info(f"Fetched manifest keys: {list(manifest.keys())}")
-    log.info(f"Found {len(tags)} tags.")
-    return tags
+    reg = registry if registry.endswith('/') else f"{registry}/"
+    uri = f"docker://{reg}{image}:{tag}"
+    def _fetch():
+        out = run_cmd(["skopeo", "inspect", uri])
+        return json.loads(out)
+    
+    try:
+        manifest = retry(RETRIES, _fetch)
+        tags = manifest.get("RepoTags", [])
+        log.info(f"Fetched {len(tags)} tags for {image}")
+        return tags
+    except Exception as e:
+        log.warning(f"Failed to fetch tags for {image}:{tag}: {e}")
+        return []
 
 def discover_tags(registry: str, image: str, stream: str) -> tuple[str, str]:
     log.info(f"Discovering tags for {image} {stream}...")
     tags = get_tag_list(registry, image, stream)
     
-    pattern = re.compile(rf"^{stream}-(?:\\d+\\.)?\\d{{8}}(?:\\.\\d+)?$")
+    pattern = re.compile(rf"^{stream}[-.]\d{{8}}(?:\.\d+)?$")
     filtered_tags = sorted([t for t in tags if pattern.match(t)])
     
     if len(filtered_tags) < 2:
