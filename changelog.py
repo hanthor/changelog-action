@@ -66,23 +66,38 @@ def retry(n: int, f: Callable) -> any:
 # SBOM Fetching
 # ----------------------------------------------------------------------------
 
-def fetch_manifest(registry: str, image: str, tag: str, resolve_index: bool = True) -> dict:
-    def _fetch():
-        # Ensure registry ends with / if not present
-        reg = registry if registry.endswith('/') else f"{registry}/"
-        cmd = ["skopeo", "inspect"]
-        # Force resolution to linux/amd64 manifest to handle manifest lists (indices)
-        # where attestations are attached to the manifest, not the index.
-        if resolve_index:
-            cmd.extend(["--override-os", "linux", "--override-arch", "amd64"])
-        cmd.append(f"docker://{reg}{image}:{tag}")
-        
-        out = run_cmd(cmd)
-        return json.loads(out)
-    return retry(RETRIES, _fetch)
-
 def get_digest(registry: str, image: str, tag: str) -> str:
-    return fetch_manifest(registry, image, tag, resolve_index=True).get("Digest")
+    reg = registry if registry.endswith('/') else f"{registry}/"
+    uri = f"docker://{reg}{image}:{tag}"
+    
+    # 1. Fetch raw manifest to check if it's a manifest list (index)
+    def _fetch_raw():
+        return run_cmd(["skopeo", "inspect", "--raw", uri])
+    
+    try:
+        raw_out = retry(RETRIES, _fetch_raw)
+        data = json.loads(raw_out)
+        
+        # OCI Image Index or Docker Manifest List
+        if "manifests" in data:
+            log.info(f"Detected manifest list for {image}:{tag}. Resolving for linux/amd64.")
+            for m in data["manifests"]:
+                p = m.get("platform", {})
+                if p.get("os") == "linux" and p.get("architecture") == "amd64":
+                    return m["digest"]
+            
+            # Fallback if no amd64 found (unlikely for Bluefin)
+            log.warning("No linux/amd64 manifest found in index. Using the first manifest.")
+            return data["manifests"][0]["digest"]
+            
+    except Exception as e:
+        log.warning(f"Failed to inspect raw manifest for {image}:{tag}: {e}")
+
+    # 2. If not a list or raw fetch failed, fall back to standard inspect
+    def _fetch_digest():
+        return run_cmd(["skopeo", "inspect", "--format", "{{.Digest}}", uri]).strip()
+        
+    return retry(RETRIES, _fetch_digest)
 
 def extract_payloads(s: str) -> list[str]:
     # Regex to extract 'payload' from JSON lines in cosign output
@@ -193,18 +208,21 @@ def build_release(registry: str, cosign_key: str, images: list[str], tag: str) -
 # ----------------------------------------------------------------------------
 
 def get_tag_list(registry: str, image: str, tag: str) -> list[str]:
-    # Don't resolve index when listing tags, just in case overrides affect RepoTags availability
-    manifest = fetch_manifest(registry, image, tag, resolve_index=False)
+    reg = registry if registry.endswith('/') else f"{registry}/"
+    uri = f"docker://{reg}{image}:{tag}"
+    # Use standard inspect to get tags
+    def _fetch():
+        out = run_cmd(["skopeo", "inspect", uri])
+        return json.loads(out)
+    
+    manifest = retry(RETRIES, _fetch)
     return manifest.get("RepoTags", [])
 
 def discover_tags(registry: str, image: str, stream: str) -> tuple[str, str]:
     log.info(f"Discovering tags for {image} {stream}...")
     tags = get_tag_list(registry, image, stream)
     
-    # Matches tags like: lts-20251115 or lts.20251115
-    # Supports hyphen or dot separator.
-    # We use f-string for stream, so single braces for stream, double for regex quantifiers.
-    pattern = re.compile(rf"^{stream}[-.]\d{{8}}(?:\.\d+)?$")
+    pattern = re.compile(rf"^{stream}-(?:\\d+\\.)?\\d{{8}}(?:\\.\\d+)?$")
     filtered_tags = sorted([t for t in tags if pattern.match(t)])
     
     if len(filtered_tags) < 2:
