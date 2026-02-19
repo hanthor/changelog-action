@@ -1,0 +1,66 @@
+name: 'Container Image Changelog'
+description: 'Generates a changelog between two container image versions using Skopeo and Cosign'
+author: 'hanthor'
+inputs:
+  registry:
+    description: 'Container registry URL'
+    required: true
+    default: 'ghcr.io/ublue-os/'
+  cosign-key:
+    description: 'URL or path to cosign public key'
+    required: true
+  images:
+    description: 'Space-separated list of image names'
+    required: true
+  stream:
+    description: 'Release stream for auto-discovery (e.g. stable, latest)'
+    required: false
+  prev-tag:
+    description: 'Previous release tag (ignored if stream is set)'
+    required: false
+  curr-tag:
+    description: 'Current release tag (ignored if stream is set)'
+    required: false
+  handwritten:
+    description: 'Optional introductory text for the changelog'
+    required: false
+  output:
+    description: 'Output file path'
+    required: false
+    default: 'changelog.md'
+  output-env:
+    description: 'Output environment file path'
+    required: false
+  json:
+    description: 'Output JSON instead of Markdown'
+    required: false
+    default: 'false'
+  verbose:
+    description: 'Enable debug logging'
+    required: false
+    default: 'false'
+
+runs:
+  using: 'docker'
+  image: 'Dockerfile'
+  args:
+    - --registry
+    - ${{ inputs.registry }}
+    - --cosign-key
+    - ${{ inputs.cosign-key }}
+    - --images
+    - ${{ inputs.images }}
+    - ${{ inputs.stream && '--stream' || '' }}
+    - ${{ inputs.stream }}
+    - ${{ !inputs.stream && inputs.prev-tag && '--prev-tag' || '' }}
+    - ${{ !inputs.stream && inputs.prev-tag }}
+    - ${{ !inputs.stream && inputs.curr-tag && '--curr-tag' || '' }}
+    - ${{ !inputs.stream && inputs.curr-tag }}
+    - ${{ inputs.handwritten && '--handwritten' || '' }}
+    - ${{ inputs.handwritten }}
+    - --output
+    - ${{ inputs.output }}
+    - ${{ inputs.output-env && '--output-env' || '' }}
+    - ${{ inputs.output-env }}
+    - ${{ inputs.json == 'true' && '--json' || '' }}
+    - ${{ inputs.verbose == 'true' && '--verbose' || '' }}
