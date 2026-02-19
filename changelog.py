@@ -66,24 +66,23 @@ def retry(n: int, f: Callable) -> any:
 # SBOM Fetching
 # ----------------------------------------------------------------------------
 
-def fetch_manifest(registry: str, image: str, tag: str) -> dict:
+def fetch_manifest(registry: str, image: str, tag: str, resolve_index: bool = True) -> dict:
     def _fetch():
         # Ensure registry ends with / if not present
         reg = registry if registry.endswith('/') else f"{registry}/"
+        cmd = ["skopeo", "inspect"]
         # Force resolution to linux/amd64 manifest to handle manifest lists (indices)
         # where attestations are attached to the manifest, not the index.
-        cmd = [
-            "skopeo", "inspect",
-            "--override-os", "linux",
-            "--override-arch", "amd64",
-            f"docker://{reg}{image}:{tag}"
-        ]
+        if resolve_index:
+            cmd.extend(["--override-os", "linux", "--override-arch", "amd64"])
+        cmd.append(f"docker://{reg}{image}:{tag}")
+        
         out = run_cmd(cmd)
         return json.loads(out)
     return retry(RETRIES, _fetch)
 
 def get_digest(registry: str, image: str, tag: str) -> str:
-    return fetch_manifest(registry, image, tag).get("Digest")
+    return fetch_manifest(registry, image, tag, resolve_index=True).get("Digest")
 
 def extract_payloads(s: str) -> list[str]:
     # Regex to extract 'payload' from JSON lines in cosign output
@@ -194,14 +193,15 @@ def build_release(registry: str, cosign_key: str, images: list[str], tag: str) -
 # ----------------------------------------------------------------------------
 
 def get_tag_list(registry: str, image: str, tag: str) -> list[str]:
-    manifest = fetch_manifest(registry, image, tag)
+    # Don't resolve index when listing tags, just in case overrides affect RepoTags availability
+    manifest = fetch_manifest(registry, image, tag, resolve_index=False)
     return manifest.get("RepoTags", [])
 
 def discover_tags(registry: str, image: str, stream: str) -> tuple[str, str]:
     log.info(f"Discovering tags for {image} {stream}...")
     tags = get_tag_list(registry, image, stream)
     
-    pattern = re.compile(rf"^{stream}-(?:\\d+\\.)?\\d{{8}}(?:\\.\\d+)?$")
+    pattern = re.compile(rf"^{{stream}}-({{0,1}}\d+\.)?\d{{8}}(?:\.\d+)?$")
     filtered_tags = sorted([t for t in tags if pattern.match(t)])
     
     if len(filtered_tags) < 2:
