@@ -348,6 +348,12 @@ def main():
     sys.argv = [arg for arg in sys.argv if arg and arg != 'false']
     args = parse_args()
 
+    # Flatten images list in case it came in as a single string with spaces
+    images = []
+    for img in args.images:
+        images.extend(img.split())
+    args.images = images
+
     if args.verbose:
         logging.getLogger().setLevel(logging.DEBUG)
 
