@@ -208,15 +208,12 @@ def build_release(registry: str, cosign_key: str, images: list[str], tag: str) -
 # ----------------------------------------------------------------------------
 
 def get_tag_list(registry: str, image: str, tag: str) -> list[str]:
-    reg = registry if registry.endswith('/') else f"{registry}/"
-    uri = f"docker://{reg}{image}:{tag}"
-    # Use standard inspect to get tags
-    def _fetch():
-        out = run_cmd(["skopeo", "inspect", uri])
-        return json.loads(out)
-    
-    manifest = retry(RETRIES, _fetch)
-    return manifest.get("RepoTags", [])
+    # Don't resolve index when listing tags, just in case overrides affect RepoTags availability
+    manifest = fetch_manifest(registry, image, tag, resolve_index=False)
+    tags = manifest.get("RepoTags", [])
+    log.info(f"Fetched manifest keys: {list(manifest.keys())}")
+    log.info(f"Found {len(tags)} tags.")
+    return tags
 
 def discover_tags(registry: str, image: str, stream: str) -> tuple[str, str]:
     log.info(f"Discovering tags for {image} {stream}...")
