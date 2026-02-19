@@ -344,6 +344,8 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 def main():
+    # Filter out empty arguments and 'false' which might be passed by GitHub Actions expressions
+    sys.argv = [arg for arg in sys.argv if arg and arg != 'false']
     args = parse_args()
 
     if args.verbose:
