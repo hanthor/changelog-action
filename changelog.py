@@ -8,6 +8,7 @@ import re
 import base64
 import argparse
 import logging
+import zstandard as zstd
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Callable
 
@@ -69,7 +70,15 @@ def fetch_manifest(registry: str, image: str, tag: str) -> dict:
     def _fetch():
         # Ensure registry ends with / if not present
         reg = registry if registry.endswith('/') else f"{registry}/"
-        out = run_cmd(["skopeo", "inspect", f"docker://{reg}{image}:{tag}"])
+        # Force resolution to linux/amd64 manifest to handle manifest lists (indices)
+        # where attestations are attached to the manifest, not the index.
+        cmd = [
+            "skopeo", "inspect",
+            "--override-os", "linux",
+            "--override-arch", "amd64",
+            f"docker://{reg}{image}:{tag}"
+        ]
+        out = run_cmd(cmd)
         return json.loads(out)
     return retry(RETRIES, _fetch)
 
@@ -77,6 +86,7 @@ def get_digest(registry: str, image: str, tag: str) -> str:
     return fetch_manifest(registry, image, tag).get("Digest")
 
 def extract_payloads(s: str) -> list[str]:
+    # Regex to extract 'payload' from JSON lines in cosign output
     return re.findall(r'"payload"\s*:\s*"([^"]+)"', s)
 
 def fetch_sbom(registry: str, cosign_key: str, image: str, digest: str) -> dict:
@@ -84,7 +94,7 @@ def fetch_sbom(registry: str, cosign_key: str, image: str, digest: str) -> dict:
         reg = registry if registry.endswith('/') else f"{registry}/"
         cmd = [
             "cosign", "verify-attestation",
-            "--type", "spdxjson",
+            # We remove --type spdxjson to fetch all attestations and manually filter/decode
             "--key", cosign_key,
             f"{reg}{image}@{digest}"
         ]
@@ -98,9 +108,36 @@ def fetch_sbom(registry: str, cosign_key: str, image: str, digest: str) -> dict:
             try:
                 payload_bytes = base64.b64decode(payload_b64)
                 payload_json = json.loads(payload_bytes.decode("utf-8"))
+                
+                predicate_type = payload_json.get("predicateType")
                 predicate = payload_json.get("predicate", {})
-                if predicate.get("artifacts") or predicate.get("packages"):
-                    return predicate
+
+                # Handle standard SPDX JSON
+                if predicate_type in ["https://spdx.dev/Document", "spdxjson", "application/spdx+json"]:
+                     if predicate.get("packages") or predicate.get("artifacts"):
+                         return predicate
+                
+                # Handle Bluefin zstd compressed SBOM
+                if predicate_type == "urn:ublue-os:attestation:spdx+json+zstd:v1":
+                    # For this type, predicate is a base64 encoded string of zstd compressed JSON
+                    if isinstance(predicate, str):
+                        zstd_bytes = base64.b64decode(predicate)
+                        dctx = zstd.ZstdDecompressor()
+                        decompressed = dctx.decompress(zstd_bytes)
+                        sbom = json.loads(decompressed)
+                        if sbom.get("packages") or sbom.get("artifacts"):
+                            return sbom
+                    elif isinstance(predicate, dict) and predicate.get("compression") == "zstd":
+                        # Handle case where predicate is object wrapping payload
+                        raw_payload = predicate.get("payload")
+                        if raw_payload:
+                            zstd_bytes = base64.b64decode(raw_payload)
+                            dctx = zstd.ZstdDecompressor()
+                            decompressed = dctx.decompress(zstd_bytes)
+                            sbom = json.loads(decompressed)
+                            if sbom.get("packages") or sbom.get("artifacts"):
+                                return sbom
+
             except Exception as e:
                 log.warning(f"Skipping payload that failed to decode: {e}")
                 continue
@@ -135,6 +172,7 @@ def parse_packages(sbom: dict) -> dict:
 
 def fetch_packages(registry: str, cosign_key: str, image: str, tag: str) -> dict:
     digest = get_digest(registry, image, tag)
+    log.info(f"Resolved {image}:{tag} to {digest}")
     sbom = fetch_sbom(registry, cosign_key, image, digest)
     return parse_packages(sbom)
 
@@ -163,7 +201,7 @@ def discover_tags(registry: str, image: str, stream: str) -> tuple[str, str]:
     log.info(f"Discovering tags for {image} {stream}...")
     tags = get_tag_list(registry, image, stream)
     
-    pattern = re.compile(rf"^{stream}-(?:\d+\.)?\d{{8}}(?:\.\d+)?$")
+    pattern = re.compile(rf"^{stream}-(?:\\d+\\.)?\\d{{8}}(?:\\.\\d+)?$")
     filtered_tags = sorted([t for t in tags if pattern.match(t)])
     
     if len(filtered_tags) < 2:
@@ -208,8 +246,6 @@ def common_packages(release: dict) -> list:
 # ----------------------------------------------------------------------------
 # Git Commits (Optional, requires local clone usually)
 # ----------------------------------------------------------------------------
-# For a generic action, this might fail if not in a specific repo structure.
-# We'll make it gracefully return empty if git fails.
 
 def fetch_commits(prev_tag: str, curr_tag: str) -> list[dict]:
     try:
