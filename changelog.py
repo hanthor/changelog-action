@@ -611,7 +611,7 @@ def parse_args() -> argparse.Namespace:
 
 def main():
     import sys
-    sys.argv = [arg for arg in sys.argv if arg and arg != "false"]
+    sys.argv = [arg for arg in sys.argv if arg.strip() and arg.strip() != "false"]
     args = parse_args()
 
     if args.verbose:
