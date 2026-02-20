@@ -1,6 +1,6 @@
 FROM fedora:latest
 
-RUN dnf install -y python3 python3-zstandard skopeo git curl && dnf clean all
+RUN dnf install -y python3 python3-zstandard zstd skopeo git curl && dnf clean all
 
 # Install Cosign
 RUN curl -L "https://github.com/sigstore/cosign/releases/latest/download/cosign-linux-amd64" -o /usr/local/bin/cosign && \
