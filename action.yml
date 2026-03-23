@@ -1,16 +1,21 @@
 name: 'Container Image Changelog'
-description: 'Generates a changelog between two container image versions using Skopeo and Cosign'
+description: 'Generates a changelog between two container image versions using SBOM attestations via Cosign'
 author: 'hanthor'
 inputs:
   family:
-    description: 'Image family to generate the changelog for (e.g., bluefin, bluefin-lts, aurora)'
+    description: 'Known image family (e.g. bluefin, aurora). Provides registry, cosign-key, and images automatically. Not needed when registry + cosign-key + images are all set.'
     required: false
-    default: 'bluefin'
+  registry:
+    description: 'Container registry prefix (e.g. ghcr.io/tuna-os/). Required when family is not set.'
+    required: false
+  cosign-key:
+    description: 'URL or path to cosign public key. Required when family is not set.'
+    required: false
   images:
-    description: 'Override the default image list for the chosen family (space-separated)'
+    description: 'Space-separated list of image names to compare (e.g. "yellowfin albacore"). Overrides the family default.'
     required: false
   stream:
-    description: 'Release stream for auto-discovery (e.g. stable, latest, lts)'
+    description: 'Release stream for auto-discovery (e.g. stable, latest, gnome). Finds the two most recent {stream}-YYYYMMDD tags.'
     required: false
   prev_tag:
     description: 'Previous release tag (ignored if stream is set)'
@@ -26,7 +31,7 @@ inputs:
     required: false
     default: 'changelog.md'
   output-env:
-    description: 'Output environment file path'
+    description: 'Output environment file path (writes TITLE=... and TAG=...)'
     required: false
   json:
     description: 'Output JSON instead of Markdown'
@@ -41,8 +46,12 @@ runs:
   using: 'docker'
   image: 'docker://ghcr.io/hanthor/changelog-action:latest'
   args:
-    - --family
+    - ${{ inputs.family && '--family' || '' }}
     - ${{ inputs.family }}
+    - ${{ inputs.registry && '--registry' || '' }}
+    - ${{ inputs.registry }}
+    - ${{ inputs.cosign-key && '--cosign-key' || '' }}
+    - ${{ inputs.cosign-key }}
     - ${{ inputs.images && '--images' || '' }}
     - ${{ inputs.images }}
     - ${{ inputs.stream && '--stream' || '' }}

@@ -365,23 +365,33 @@ def get_tag_list(registry: str, image: str, tag: str) -> list[str]:
     return manifest.get("RepoTags", [])
 
 
-def discover_tags(family: str, stream: str) -> tuple[str, str]:
+def discover_tags(
+    stream: str,
+    family: str | None = None,
+    registry: str | None = None,
+    images: list[str] | None = None,
+) -> tuple[str, str]:
     """
     Find the latest two tags for the given stream (e.g. 'stable', 'latest').
     Returns (prev_tag, curr_tag).
+
+    Resolves registry and image list from either:
+      - explicit registry + images arguments, or
+      - IMAGE_CONFIGS[family] (legacy behaviour, requires a known family).
     """
-    config = IMAGE_CONFIGS.get(family)
-    if not config:
-        raise ValueError(f"Unknown family: {family}")
+    if registry and images:
+        image = images[0]
+    else:
+        config = IMAGE_CONFIGS.get(family or "")
+        if not config:
+            raise ValueError(
+                f"Either --registry + --images, or a known --family must be provided. "
+                f"Known families: {list(IMAGE_CONFIGS.keys())}"
+            )
+        registry = config["registry"]
+        image = config["images"][0]
 
-    registry = config["registry"]
-    # Use the first image in the list to find tags
-    image = config["images"][0]
-
-    # Map 'stable' stream to the tag to inspect for RepoTags (usually just the stream name)
-    # The old script inspected image:stream to get RepoTags.
-
-    log.info(f"Discovering tags for {family} {stream}...")
+    log.info(f"Discovering tags for stream '{stream}' on {registry}{image}...")
     tags = get_tag_list(registry, image, stream)
 
     # Filter tags: looking for {stream}-YYYYMMDD or similar patterns.
@@ -512,18 +522,25 @@ def build_website_data(curr_release: dict) -> dict:
 def build_release_data(
     prev_tag: str,
     curr_tag: str,
-    family: str = DEFAULT_FAMILY,
+    family: str | None = None,
     images: list[str] | None = None,
+    registry: str | None = None,
+    cosign_key: str | None = None,
 ) -> dict:
-    config = IMAGE_CONFIGS.get(family)
-    if config is None:
-        raise ValueError(
-            f"Unknown image family '{family}'. Known families: {list(IMAGE_CONFIGS.keys())}"
-        )
-
-    registry = config["registry"]
-    cosign_key = config["cosign_key"]
-    images = images or config["images"]
+    # Resolve registry, cosign_key, and images from explicit args or IMAGE_CONFIGS.
+    if registry and cosign_key:
+        if not images:
+            raise ValueError("--images must be provided when --registry and --cosign-key are used")
+    else:
+        config = IMAGE_CONFIGS.get(family or "")
+        if config is None:
+            raise ValueError(
+                f"Either --registry + --cosign-key + --images, or a known --family must be provided. "
+                f"Known families: {list(IMAGE_CONFIGS.keys())}"
+            )
+        registry = registry or config["registry"]
+        cosign_key = cosign_key or config["cosign_key"]
+        images = images or config["images"]
 
     prev_release = build_release(registry, cosign_key, images, prev_tag)
     curr_release = build_release(registry, cosign_key, images, curr_tag)
@@ -532,7 +549,7 @@ def build_release_data(
     website = build_website_data(curr_release)
 
     return {
-        "family": family,
+        "family": family or registry,
         "prev-tag": prev_tag,
         "curr-tag": curr_tag,
         "images": images,
@@ -551,7 +568,7 @@ def build_release_data(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Generate a changelog between two Bluefin/Aurora image releases.",
+        description="Generate a changelog between two container image releases using SBOM attestations.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
 
@@ -565,20 +582,34 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument(
         "--stream",
-        help="Release stream (e.g. stable, latest) to automatically discover tags",
+        help="Release stream (e.g. stable, latest, gnome) to automatically discover tags",
     )
 
     parser.add_argument(
         "--family",
-        default=DEFAULT_FAMILY,
+        default=None,
         choices=list(IMAGE_CONFIGS.keys()),
-        help="Image family to generate the changelog for",
+        help=(
+            "Known image family (e.g. bluefin, aurora). "
+            "Provides registry, cosign-key, and images automatically. "
+            "Not required when --registry, --cosign-key, and --images are all set."
+        ),
+    )
+    parser.add_argument(
+        "--registry",
+        metavar="URL",
+        help="Container registry prefix (e.g. ghcr.io/tuna-os/). Required when --family is not set.",
+    )
+    parser.add_argument(
+        "--cosign-key",
+        metavar="KEY",
+        help="URL or path to cosign public key. Required when --family is not set.",
     )
     parser.add_argument(
         "--images",
         nargs="+",
         metavar="IMAGE",
-        help="Override the default image list for the chosen family",
+        help="Image names to compare (e.g. yellowfin albacore). Overrides the family default.",
     )
     parser.add_argument(
         "--output",
@@ -617,14 +648,27 @@ def main():
     if args.verbose:
         logging.getLogger().setLevel(logging.DEBUG)
 
-    # Validation
+    # Validate: need either a known family, or explicit registry+cosign-key
+    using_explicit = args.registry and args.cosign_key
+    using_family = args.family is not None
+    if not using_explicit and not using_family:
+        log.error(
+            "Either --family (e.g. bluefin) OR both --registry and --cosign-key must be provided."
+        )
+        sys.exit(1)
+
+    # Discover or validate tags
     if args.stream:
         if args.prev_tag or args.curr_tag:
             log.warning(
                 "Arguments 'prev_tag' and 'curr_tag' are ignored when '--stream' is provided."
             )
-
-        prev_tag, curr_tag = discover_tags(args.family, args.stream)
+        prev_tag, curr_tag = discover_tags(
+            stream=args.stream,
+            family=args.family,
+            registry=args.registry,
+            images=args.images,
+        )
     else:
         if not args.prev_tag or not args.curr_tag:
             log.error(
@@ -641,6 +685,8 @@ def main():
         curr_tag=curr_tag,
         family=args.family,
         images=args.images,
+        registry=args.registry,
+        cosign_key=args.cosign_key,
     )
 
     if args.json:
@@ -654,7 +700,6 @@ def main():
         log.info(f"✅ Markdown written to {out_file}")
 
     if args.output_env:
-        # Generate title similar to old script logic
         variant_label = infer_variant_label(curr_tag)
         title = f"{curr_tag}: {variant_label}"
         with open(args.output_env, "w") as f:
