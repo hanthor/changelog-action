@@ -222,6 +222,63 @@ def fetch_sbom(registry: str, cosign_key: str, image: str, digest: str) -> dict:
     return retry(RETRIES, _fetch)
 
 
+def fetch_sbom_oras(registry: str, image: str, digest: str) -> dict:
+    """
+    Fetch an SBOM stored as an OCI referrer via `oras attach`.
+
+    Uses `oras discover` to find referrers with artifact-type
+    application/vnd.spdx+json, then `oras blob fetch` to download
+    the content.
+    """
+    import tempfile
+
+    ref = f"{registry}{image}@{digest}"
+
+    # Discover referrers of the given type
+    out = run_cmd(
+        [
+            "oras",
+            "discover",
+            "--artifact-type",
+            "application/vnd.spdx+json",
+            "--format",
+            "json",
+            ref,
+        ]
+    )
+    data = json.loads(out)
+
+    referrers = data.get("referrers", [])
+    if not referrers:
+        raise ValueError(f"No ORAS SBOM referrers found for {ref}")
+
+    # Take the most recent referrer
+    referrer = referrers[-1]
+    ref_digest = referrer.get("digest")
+    if not ref_digest:
+        raise ValueError(f"Referrer has no digest: {referrer}")
+
+    # Pull the referrer artifact to a temp directory
+    with tempfile.TemporaryDirectory() as tmpdir:
+        run_cmd(
+            [
+                "oras",
+                "pull",
+                "--output",
+                tmpdir,
+                f"{registry}{image}@{ref_digest}",
+            ]
+        )
+        import os
+
+        # Find the first .json file in the tmpdir
+        json_files = [f for f in os.listdir(tmpdir) if f.endswith(".json")]
+        if not json_files:
+            raise ValueError(f"No JSON file found after oras pull to {tmpdir}")
+        with open(os.path.join(tmpdir, json_files[0])) as fh:
+            return json.load(fh)
+
+
 # ----------------------------------------------------------------------------
 # Package Extraction
 # ----------------------------------------------------------------------------
@@ -267,7 +324,14 @@ def parse_packages(sbom: dict) -> dict:
 
 def fetch_packages(registry: str, cosign_key: str, image: str, tag: str) -> dict:
     digest = get_digest(registry, image, tag)
-    sbom = fetch_sbom(registry, cosign_key, image, digest)
+    try:
+        sbom = fetch_sbom(registry, cosign_key, image, digest)
+    except Exception as cosign_err:
+        log.debug(
+            f"cosign attestation fetch failed for {image}@{digest}: {cosign_err}. "
+            f"Falling back to ORAS referrers..."
+        )
+        sbom = retry(RETRIES, lambda: fetch_sbom_oras(registry, image, digest))
     return parse_packages(sbom)
 
 
