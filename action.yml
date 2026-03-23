@@ -17,6 +17,9 @@ inputs:
   stream:
     description: 'Release stream for auto-discovery (e.g. stable, latest, gnome). Finds the two most recent {stream}-YYYYMMDD tags.'
     required: false
+  tag-pattern:
+    description: 'Override regex for tag discovery (e.g. "^\d{8}$" for bare date tags). Only used when stream is set.'
+    required: false
   prev_tag:
     description: 'Previous release tag (ignored if stream is set)'
     required: false
@@ -56,6 +59,8 @@ runs:
     - ${{ inputs.images }}
     - ${{ inputs.stream && '--stream' || '' }}
     - ${{ inputs.stream }}
+    - ${{ inputs.tag-pattern && '--tag-pattern' || '' }}
+    - ${{ inputs.tag-pattern }}
     - ${{ inputs.handwritten && '--handwritten' || '' }}
     - ${{ inputs.handwritten }}
     - --output

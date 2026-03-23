@@ -370,6 +370,7 @@ def discover_tags(
     family: str | None = None,
     registry: str | None = None,
     images: list[str] | None = None,
+    tag_pattern: str | None = None,
 ) -> tuple[str, str]:
     """
     Find the latest two tags for the given stream (e.g. 'stable', 'latest').
@@ -403,7 +404,7 @@ def discover_tags(
 
     # Pattern: ^stream[-.](?:\d+\.)?\d{8}(?:\.\d+)?$ (matches stable-20250101, stable-43.20250101, stable-20250101.1, lts.20250101)
 
-    pattern = re.compile(rf"^{stream}[-.](?:\d+\.)?\d{{8}}(?:\.\d+)?$")
+    pattern = re.compile(tag_pattern if tag_pattern else rf"^{stream}[-.](?:\d+\.)?\d{{8}}(?:\.\d+)?$")
 
     filtered_tags = sorted([t for t in tags if pattern.match(t)])
 
@@ -586,6 +587,15 @@ def parse_args() -> argparse.Namespace:
     )
 
     parser.add_argument(
+        "--tag-pattern",
+        metavar="REGEX",
+        help=(
+            "Override the default stream-derived tag regex (e.g. r'^\\d{8}$' for bare date tags). "
+            "Only used when --stream is provided."
+        ),
+    )
+
+    parser.add_argument(
         "--family",
         default=None,
         choices=list(IMAGE_CONFIGS.keys()),
@@ -673,6 +683,7 @@ def main():
             family=args.family,
             registry=args.registry,
             images=args.images,
+            tag_pattern=args.tag_pattern,
         )
     else:
         if not args.prev_tag or not args.curr_tag:
