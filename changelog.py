@@ -648,6 +648,11 @@ def main():
     if args.verbose:
         logging.getLogger().setLevel(logging.DEBUG)
 
+    # When the action passes --images as a single space-separated string
+    # (e.g. "yellowfin albacore skipjack"), split it into a proper list.
+    if args.images and len(args.images) == 1 and " " in args.images[0]:
+        args.images = args.images[0].split()
+
     # Validate: need either a known family, or explicit registry+cosign-key
     using_explicit = args.registry and args.cosign_key
     using_family = args.family is not None
