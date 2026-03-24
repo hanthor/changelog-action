@@ -472,13 +472,41 @@ def discover_tags(
 
     filtered_tags = sorted([t for t in tags if pattern.match(t)])
 
-    if len(filtered_tags) < 2:
+    # Only consider tags that have an SBOM referrer attached via ORAS.
+    # This ensures we never try to diff against a build that pre-dates SBOM enablement.
+    sbom_tags = []
+    for t in filtered_tags:
+        try:
+            digest = get_digest(registry, image, t)
+            out = run_cmd(
+                [
+                    "oras",
+                    "discover",
+                    "--artifact-type",
+                    "application/vnd.spdx+json",
+                    "--format",
+                    "json",
+                    f"{registry}{image}@{digest}",
+                ]
+            )
+            referrers = json.loads(out).get("referrers", [])
+            if referrers:
+                sbom_tags.append(t)
+            else:
+                log.debug(f"Tag {t} has no SBOM referrer — skipping.")
+        except Exception as e:
+            log.debug(f"Could not check SBOM for tag {t}: {e} — skipping.")
+
+    if len(sbom_tags) < 2:
         raise ValueError(
-            f"Found fewer than 2 tags matching pattern '{pattern.pattern}' for {stream}. Found: {filtered_tags}"
+            f"Found fewer than 2 SBOM-bearing tags matching pattern '{pattern.pattern}' "
+            f"for {stream}. SBOM tags found: {sbom_tags}. "
+            f"All matching tags: {filtered_tags}. "
+            f"Builds may not yet have SBOM attachments — wait for at least two SBOM-enabled builds."
         )
 
-    prev = filtered_tags[-2]
-    curr = filtered_tags[-1]
+    prev = sbom_tags[-2]
+    curr = sbom_tags[-1]
 
     log.info(f"Discovered tags: prev={prev}, curr={curr}")
     return prev, curr
