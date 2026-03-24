@@ -325,13 +325,13 @@ def parse_packages(sbom: dict) -> dict:
 def fetch_packages(registry: str, cosign_key: str, image: str, tag: str) -> dict:
     digest = get_digest(registry, image, tag)
     try:
-        sbom = fetch_sbom(registry, cosign_key, image, digest)
-    except Exception as cosign_err:
-        log.debug(
-            f"cosign attestation fetch failed for {image}@{digest}: {cosign_err}. "
-            f"Falling back to ORAS referrers..."
-        )
         sbom = retry(RETRIES, lambda: fetch_sbom_oras(registry, image, digest))
+    except Exception as oras_err:
+        log.debug(
+            f"ORAS referrer fetch failed for {image}@{digest}: {oras_err}. "
+            f"Falling back to cosign attestation..."
+        )
+        sbom = fetch_sbom(registry, cosign_key, image, digest)
     return parse_packages(sbom)
 
 
